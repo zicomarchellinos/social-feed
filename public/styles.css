@@ -259,3 +259,79 @@ img { display: block; }
   background: var(--text); color: #fff; padding: 10px 18px; border-radius: 999px;
   font-size: 14px; z-index: 60; max-width: 90%; text-align: center;
 }
+
+/* ---------- Stepped login ---------- */
+.auth-email-chip {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--input-bg); border: 1px solid var(--divider); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.auth-email-chip .chip-email {
+  font-weight: 600; font-size: 14px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.link-btn {
+  background: none; border: none; color: var(--accent); font-weight: 700;
+  font-size: 14px; padding: 4px 2px; flex-shrink: 0;
+}
+/* Step 2 slides in from the right; going back slides in from the left. */
+.auth-step.anim-forward { animation: step-in-right 0.22s ease-out; }
+.auth-step.anim-back { animation: step-in-left 0.22s ease-out; }
+@keyframes step-in-right {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes step-in-left {
+  from { opacity: 0; transform: translateX(-24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-step.anim-forward, .auth-step.anim-back { animation: none; }
+}
+
+/* ---------- Responsive ---------- */
+/* Never let anything force horizontal scrolling; media always fits its card. */
+html, body { overflow-x: clip; }
+img, video { max-width: 100%; }
+button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* Phones (<=480px): tighter gutters, stacked profile, 44px touch targets. */
+@media (max-width: 480px) {
+  /* 16px inputs stop iOS Safari auto-zooming on focus. */
+  .field input, .field textarea, .search-box input,
+  .comment-form input, .thread-composer input { font-size: 16px; }
+
+  .auth-wrap { padding: 32px 16px 16px; }
+  .auth-logo { font-size: 28px; }
+  .topbar { padding: 10px 12px; }
+  .wordmark { font-size: 20px; }
+
+  .composer { padding: 12px; gap: 8px; }
+  .post-header, .post-body, .action-row, .like-count,
+  .comment-preview, .view-comments, .comments { padding-left: 12px; padding-right: 12px; }
+  .post-photo { max-height: 420px; }
+
+  .profile-head { padding: 16px 12px 10px; }
+  .profile-top { flex-wrap: wrap; gap: 12px; }
+  .avatar.lg { width: 72px; height: 72px; }
+  .avatar-initials.lg { font-size: 26px; }
+  .profile-stats { flex-basis: 100%; justify-content: space-around; gap: 8px; }
+  .profile-actions { flex-wrap: wrap; }
+  .profile-actions .btn-outline { flex: 1 1 120px; }
+
+  .row-item, .community-card, .search-box, .back-row { padding-left: 12px; padding-right: 12px; }
+  .thread-messages { padding: 10px 12px 8px; }
+  .msg { max-width: 85%; }
+  .thread-composer { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+  .edit-form { padding: 12px; }
+
+  /* 44px minimum touch targets for icon controls and tabs. */
+  .tab { min-height: 48px; }
+  .icon-btn, .post-header .menu-btn, .action-btn {
+    min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .comment-form button, .thread-composer button { min-height: 44px; padding: 0 8px; }
+}

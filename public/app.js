@@ -107,8 +107,10 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(path, { method: opts.method || 'GET', headers, body });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) {
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
     // Session gone: drop the token and show the auth screen.
+    // (Auth endpoints answer their own 401s — e.g. a wrong password — and
+    // must not bounce the user out of the login flow.)
     state.token = null;
     state.user = null;
     localStorage.removeItem('sf_token');
@@ -123,9 +125,13 @@ async function api(path, opts = {}) {
 // Auth screens
 // ---------------------------------------------------------------------------
 
-function showAuth(mode) {
+function showAuth(mode, dir) {
   stopThreadPolling();
   state.view = { name: 'auth' };
+  // Switching tabs resets the login flow to step 1, but keeps a typed email.
+  if (mode === 'login' && dir === undefined) state.loginStep = 1;
+  const step = mode === 'login' ? (state.loginStep || 1) : 1;
+  const anim = dir === 'forward' ? 'anim-forward' : dir === 'back' ? 'anim-back' : '';
   app.innerHTML = `
     <div class="auth-wrap">
       <div class="auth-logo">Social Feed</div>
@@ -134,14 +140,22 @@ function showAuth(mode) {
         <button class="auth-tab ${mode === 'register' ? 'active' : ''}" onclick="showAuth('register')">Register</button>
       </div>
       <div class="form-error" id="auth-error"></div>
-      ${mode === 'login' ? `
-      <form id="auth-form" onsubmit="return doLogin(event)">
-        <div class="field"><label>Email</label>
-          <input type="email" name="email" required autocomplete="email" placeholder="you@example.com"></div>
-        <div class="field"><label>Password</label>
-          <input type="password" name="password" required autocomplete="current-password" placeholder="Your password"></div>
-        <button class="btn-primary" id="auth-submit" type="submit">Log in</button>
-      </form>` : `
+      ${mode === 'login' ? (step === 1 ? `
+      <div class="auth-step ${anim}" id="login-step-1">
+        <form id="auth-form" onsubmit="return goLoginStep2(event)" novalidate>
+          <div class="field"><label>Email</label>
+            <input type="email" name="email" required autocomplete="email" placeholder="you@example.com" value="${esc(state.loginEmail || '')}" autofocus></div>
+          <button class="btn-primary" id="auth-submit" type="submit">Next</button>
+        </form>
+      </div>` : `
+      <div class="auth-step ${anim}" id="login-step-2">
+        <div class="auth-email-chip"><span class="chip-email">${esc(state.loginEmail || '')}</span><button class="link-btn" type="button" onclick="backLoginStep1()">Change</button></div>
+        <form id="auth-form" onsubmit="return doLogin(event)">
+          <div class="field"><label>Password</label>
+            <input type="password" name="password" required autocomplete="current-password" placeholder="Your password" autofocus></div>
+          <button class="btn-primary" id="auth-submit" type="submit">Log in</button>
+        </form>
+      </div>`) : `
       <form id="auth-form" onsubmit="return doRegister(event)">
         <div class="field"><label>Display name</label>
           <input type="text" name="display_name" required maxlength="50" placeholder="Your name"></div>
@@ -162,6 +176,33 @@ function authError(msg) {
   if (el) el.textContent = msg || '';
 }
 
+// Login step 1 -> 2: only advance when the email is non-empty and well-formed.
+function goLoginStep2(e) {
+  e.preventDefault();
+  const input = e.target.querySelector('input[name="email"]');
+  const email = (input.value || '').trim();
+  if (!email) {
+    authError('Enter your email address.');
+    input.focus();
+    return false;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    authError('That email address does not look right. Check it and try again.');
+    input.focus();
+    return false;
+  }
+  state.loginEmail = email;
+  state.loginStep = 2;
+  showAuth('login', 'forward');
+  return false;
+}
+
+// Login step 2 -> 1: the email is kept, so the user can edit it.
+function backLoginStep1() {
+  state.loginStep = 1;
+  showAuth('login', 'back');
+}
+
 async function doLogin(e) {
   e.preventDefault();
   const f = new FormData(e.target);
@@ -171,7 +212,7 @@ async function doLogin(e) {
   try {
     const { user, token } = await api('/api/auth/login', {
       method: 'POST',
-      body: { email: f.get('email'), password: f.get('password') },
+      body: { email: state.loginEmail, password: f.get('password') },
     });
     enterApp(user, token);
   } catch (err) {
