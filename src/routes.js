@@ -106,12 +106,14 @@ function validEmail(email) {
 // Math CAPTCHA (security check on login/register)
 // ---------------------------------------------------------------------------
 // Challenges live only in memory: the question goes to the client, the
-// answer never leaves the server. Each challenge is single-use and expires
-// after 5 minutes.
+// answer never leaves the server. Lifecycle: pending -> verified (via
+// POST /auth/challenge/verify) -> consumed (by one login/register attempt).
+// Each challenge expires after 5 minutes and allows 3 wrong answers.
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const CHALLENGE_MAX_ATTEMPTS = 3;
 const MATH_CHECK_ERROR = 'Math check failed. Please try a new question.';
-const challenges = new Map(); // challenge_id -> { answer, expiresAt }
+const challenges = new Map(); // challenge_id -> { answer, expiresAt, status, attempts }
 
 function newChallenge() {
   // Lazy cleanup of expired challenges.
@@ -136,21 +138,19 @@ function newChallenge() {
     answer = a - b;
   }
   const id = uuid();
-  challenges.set(id, { answer, expiresAt: now + CHALLENGE_TTL_MS });
+  challenges.set(id, { answer, expiresAt: now + CHALLENGE_TTL_MS, status: 'pending', attempts: 0 });
   return { challenge_id: id, question: `What is ${a} ${op} ${b}?` };
 }
 
-// Single-use: the challenge is deleted whether the answer is right or wrong.
+// Consumes the challenge: only a server-verified, unexpired challenge
+// passes, and it is deleted whether the login/register itself succeeds.
 function verifyChallenge(req) {
   const id = req.body.challenge_id;
-  const given = req.body.captcha_answer;
   if (typeof id !== 'string' || id === '') return false;
   const c = challenges.get(id);
   challenges.delete(id);
   if (!c || c.expiresAt <= Date.now()) return false;
-  const n = typeof given === 'string' ? given.trim() : given;
-  if (n === '' || n === null || n === undefined) return false;
-  return Number(n) === c.answer;
+  return c.status === 'verified';
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +243,42 @@ router.get('/auth/challenge', (req, res, next) => {
     return next(httpError(429, 'Too many requests. Please wait a moment and try again.'));
   }
   res.json(newChallenge());
+});
+
+// Verify one answer. A wrong answer keeps the challenge pending (up to 3
+// attempts, so a bot cannot brute-force the small answer space); a right
+// answer marks it verified, which is what login/register require.
+router.post('/auth/challenge/verify', (req, res, next) => {
+  if (hitLimit(challengeHits, req.ip, CHALLENGE_LIMIT)) {
+    return next(httpError(429, 'Too many requests. Please wait a moment and try again.'));
+  }
+  const id = req.body.challenge_id;
+  const given = req.body.captcha_answer;
+  if (typeof id !== 'string' || id === '') {
+    return next(httpError(400, 'Challenge expired. Please try a new question.'));
+  }
+  const c = challenges.get(id);
+  if (!c || c.expiresAt <= Date.now()) {
+    if (c) challenges.delete(id);
+    return next(httpError(400, 'Challenge expired. Please try a new question.'));
+  }
+  if (c.status === 'verified') return res.json({ verified: true });
+  const n = typeof given === 'string' ? given.trim() : given;
+  if (n === '' || n === null || n === undefined || Number(n) !== c.answer) {
+    c.attempts += 1;
+    if (c.attempts >= CHALLENGE_MAX_ATTEMPTS) {
+      challenges.delete(id);
+      return res.json({ verified: false, error: 'too_many_attempts' });
+    }
+    return res.json({
+      verified: false,
+      error: 'incorrect_answer',
+      attempts_left: CHALLENGE_MAX_ATTEMPTS - c.attempts,
+    });
+  }
+  c.status = 'verified';
+  c.verifiedAt = Date.now();
+  return res.json({ verified: true });
 });
 
 router.post('/auth/register', (req, res, next) => {

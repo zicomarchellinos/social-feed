@@ -128,6 +128,10 @@ async function api(path, opts = {}) {
 function showAuth(mode, dir) {
   stopThreadPolling();
   state.view = { name: 'auth' };
+  // Every auth render gets a fresh security check: never carry a verified
+  // challenge between tabs, steps, or login/register.
+  state.challenge = null;
+  state.captchaVerified = false;
   // Switching tabs resets the login flow to step 1, but keeps a typed email.
   if (mode === 'login' && dir === undefined) state.loginStep = 1;
   const step = mode === 'login' ? (state.loginStep || 1) : 1;
@@ -153,8 +157,8 @@ function showAuth(mode, dir) {
         <form id="auth-form" onsubmit="return doLogin(event)">
           <div class="field"><label>Password</label>
             <input type="password" name="password" required autocomplete="current-password" placeholder="Your password" autofocus></div>
-          ${captchaFieldHtml()}
-          <button class="btn-primary" id="auth-submit" type="submit">Log in</button>
+          ${captchaWidgetHtml()}
+          <button class="btn-primary" id="auth-submit" type="submit" disabled>Log in</button>
         </form>
       </div>`) : `
       <form id="auth-form" onsubmit="return doRegister(event)">
@@ -167,12 +171,10 @@ function showAuth(mode, dir) {
           <div class="hint">At least 8 characters.</div></div>
         <div class="field"><label>Confirm password</label>
           <input type="password" name="confirm" required minlength="8" autocomplete="new-password" placeholder="Repeat your password"></div>
-        ${captchaFieldHtml()}
-        <button class="btn-primary" id="auth-submit" type="submit">Create account</button>
+        ${captchaWidgetHtml()}
+        <button class="btn-primary" id="auth-submit" type="submit" disabled>Create account</button>
       </form>`}
     </div>`;
-  // Fetch a fresh math question whenever the form shows one.
-  if ((mode === 'login' && step === 2) || mode === 'register') loadChallenge();
 }
 
 function authError(msg) {
@@ -181,8 +183,39 @@ function authError(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Math CAPTCHA: the question comes from the server; the answer never does.
+// Math CAPTCHA, reCAPTCHA-style: checkbox first, math question on click.
+// The answer is verified against the server before the box gets its check.
 // ---------------------------------------------------------------------------
+
+function captchaWidgetHtml() {
+  return `
+    <div class="rc-box" id="captcha-widget">
+      <div class="rc-row">
+        <button type="button" class="rc-check" id="captcha-check" onclick="toggleCaptcha(event)" aria-label="I'm not a robot"></button>
+        <span class="rc-label">I'm not a robot</span>
+        <span class="rc-mark">Math check<br>protected</span>
+      </div>
+      <div class="rc-panel" id="captcha-panel" hidden>
+        <div class="captcha-question" id="captcha-question">Loading…</div>
+        <div class="captcha-row">
+          <input type="text" name="captcha_answer" inputmode="numeric" autocomplete="off" placeholder="Your answer" onkeydown="if(event.key==='Enter'){event.preventDefault();verifyCaptcha(event);}">
+          <button class="captcha-refresh" type="button" onclick="refreshChallenge(event)" title="New question" aria-label="New question">↻</button>
+        </div>
+        <button class="btn-primary rc-verify" type="button" id="captcha-verify-btn" onclick="verifyCaptcha(event)">Verify</button>
+        <div class="rc-error" id="captcha-error"></div>
+      </div>
+    </div>`;
+}
+
+function captchaError(msg) {
+  const el = document.getElementById('captcha-error');
+  if (el) el.textContent = msg || '';
+}
+
+function setSubmitEnabled(enabled) {
+  const btn = document.getElementById('auth-submit');
+  if (btn) btn.disabled = !enabled;
+}
 
 async function loadChallenge() {
   const q = document.getElementById('captcha-question');
@@ -199,26 +232,101 @@ async function refreshChallenge(e) {
   if (e) e.preventDefault();
   const input = document.querySelector('input[name="captcha_answer"]');
   if (input) input.value = '';
+  captchaError('');
   const q = document.getElementById('captcha-question');
   if (q) q.textContent = 'Loading…';
   await loadChallenge();
   if (input) input.focus();
 }
 
-// After a failed math check: fresh question, clear only the answer.
-function onCaptchaFailed() {
-  refreshChallenge();
+function toggleCaptcha(e) {
+  if (e) e.preventDefault();
+  if (state.captchaVerified) return; // verified is final until submit/reset
+  const panel = document.getElementById('captcha-panel');
+  if (!panel) return;
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  if (opening) {
+    if (!state.challenge) {
+      // Clear any stale question so the old text is never answered against
+      // the new challenge.
+      const q = document.getElementById('captcha-question');
+      if (q) q.textContent = 'Loading…';
+      loadChallenge();
+    }
+    const input = document.querySelector('input[name="captcha_answer"]');
+    if (input) input.focus();
+  }
 }
 
-function captchaFieldHtml() {
-  return `
-    <div class="captcha-box">
-      <div class="captcha-question" id="captcha-question">Loading…</div>
-      <div class="captcha-row">
-        <input type="text" name="captcha_answer" required inputmode="numeric" autocomplete="off" placeholder="Your answer">
-        <button class="captcha-refresh" type="button" onclick="refreshChallenge(event)" title="New question" aria-label="New question">↻</button>
-      </div>
-    </div>`;
+async function verifyCaptcha(e) {
+  if (e) e.preventDefault();
+  const input = document.querySelector('input[name="captcha_answer"]');
+  const answer = (input ? input.value : '').trim();
+  if (!answer) {
+    captchaError('Enter your answer first.');
+    if (input) input.focus();
+    return;
+  }
+  if (!state.challenge) {
+    captchaError('No question loaded. Tap refresh to retry.');
+    return;
+  }
+  const check = document.getElementById('captcha-check');
+  const verifyBtn = document.getElementById('captcha-verify-btn');
+  if (check) check.classList.add('verifying');
+  if (verifyBtn) verifyBtn.disabled = true;
+  if (input) input.disabled = true;
+  captchaError('');
+  try {
+    const r = await api('/api/auth/challenge/verify', {
+      method: 'POST',
+      body: { challenge_id: state.challenge.challenge_id, captcha_answer: answer },
+    });
+    if (r.verified) {
+      state.captchaVerified = true;
+      if (check) { check.classList.remove('verifying'); check.classList.add('checked'); }
+      const panel = document.getElementById('captcha-panel');
+      if (panel) panel.hidden = true;
+      setSubmitEnabled(true);
+      return;
+    }
+    // Wrong answer: the same question stays (attempts left) or a new one
+    // is needed after too many tries.
+    if (r.error === 'too_many_attempts') {
+      captchaError('Too many tries. Here is a new question.');
+      await refreshChallenge();
+    } else {
+      captchaError('Incorrect answer. Try again.' +
+        (r.attempts_left ? ` (${r.attempts_left} ${r.attempts_left === 1 ? 'try' : 'tries'} left)` : ''));
+      if (input) { input.value = ''; input.focus(); }
+    }
+  } catch (err) {
+    // Expired or unknown challenge (400): fetch a fresh question.
+    captchaError('That question expired. Here is a new one.');
+    await refreshChallenge();
+  } finally {
+    if (check) check.classList.remove('verifying');
+    if (verifyBtn) verifyBtn.disabled = false;
+    if (input) input.disabled = false;
+  }
+}
+
+// Back to unchecked: used after a failed submit (the challenge was consumed
+// server-side) and whenever the auth screen re-renders.
+function resetCaptcha() {
+  state.challenge = null;
+  state.captchaVerified = false;
+  const check = document.getElementById('captcha-check');
+  if (check) check.classList.remove('checked', 'verifying');
+  const panel = document.getElementById('captcha-panel');
+  if (panel) panel.hidden = true;
+  const q = document.getElementById('captcha-question');
+  if (q) q.textContent = 'Loading…';
+  const input = document.querySelector('input[name="captcha_answer"]');
+  if (input) { input.value = ''; input.disabled = false; }
+  captchaError('');
+  setSubmitEnabled(false);
 }
 
 // Login step 1 -> 2: only advance when the email is non-empty and well-formed.
@@ -250,6 +358,12 @@ function backLoginStep1() {
 
 async function doLogin(e) {
   e.preventDefault();
+  if (!state.captchaVerified || !state.challenge) {
+    authError('Please complete the security check first.');
+    const panel = document.getElementById('captcha-panel');
+    if (panel && panel.hidden) toggleCaptcha();
+    return false;
+  }
   const f = new FormData(e.target);
   const btn = document.getElementById('auth-submit');
   btn.disabled = true;
@@ -260,17 +374,15 @@ async function doLogin(e) {
       body: {
         email: state.loginEmail,
         password: f.get('password'),
-        challenge_id: state.challenge ? state.challenge.challenge_id : null,
-        captcha_answer: f.get('captcha_answer'),
+        challenge_id: state.challenge.challenge_id,
       },
     });
     enterApp(user, token);
   } catch (err) {
     authError(err.message);
-    btn.disabled = false;
-    // The challenge is single-use: any failed submit spent it, so a fresh
-    // question is needed even when the failure was a wrong password.
-    onCaptchaFailed();
+    // The verified challenge was consumed by the attempt, so the widget
+    // goes back to unchecked even when the failure was a wrong password.
+    resetCaptcha();
   }
   return false;
 }
@@ -280,6 +392,12 @@ async function doRegister(e) {
   const f = new FormData(e.target);
   if (f.get('password') !== f.get('confirm')) {
     authError('Passwords do not match.');
+    return false;
+  }
+  if (!state.captchaVerified || !state.challenge) {
+    authError('Please complete the security check first.');
+    const panel = document.getElementById('captcha-panel');
+    if (panel && panel.hidden) toggleCaptcha();
     return false;
   }
   const btn = document.getElementById('auth-submit');
@@ -292,17 +410,14 @@ async function doRegister(e) {
         display_name: f.get('display_name'),
         email: f.get('email'),
         password: f.get('password'),
-        challenge_id: state.challenge ? state.challenge.challenge_id : null,
-        captcha_answer: f.get('captcha_answer'),
+        challenge_id: state.challenge.challenge_id,
       },
     });
     enterApp(user, token);
   } catch (err) {
     authError(err.message);
-    btn.disabled = false;
-    // The challenge is single-use: any failed submit spent it, so a fresh
-    // question is needed even when the failure was not the math itself.
-    onCaptchaFailed();
+    // The verified challenge was consumed by the attempt.
+    resetCaptcha();
   }
   return false;
 }
