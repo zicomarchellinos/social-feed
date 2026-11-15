@@ -1,0 +1,1 @@
+{"dependencies":{"bcryptjs":"^2.4.3","better-sqlite3":"^11.10.0","express":"^4.21.2","multer":"^2.5.0"},"description":"Instagram-style social feed: posts, likes, comments, profiles, DMs, communities. Single-service Node + Express + SQLite app.","engines":{"node":">=20"},"license":"MIT","main":"server.js","name":"social-feed","scripts":{"start":"node server.js"},"version":"1.0.0"}
