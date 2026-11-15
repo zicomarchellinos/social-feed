@@ -103,6 +103,79 @@ function validEmail(email) {
 }
 
 // ---------------------------------------------------------------------------
+// Math CAPTCHA (security check on login/register)
+// ---------------------------------------------------------------------------
+// Challenges live only in memory: the question goes to the client, the
+// answer never leaves the server. Each challenge is single-use and expires
+// after 5 minutes.
+
+const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MATH_CHECK_ERROR = 'Math check failed. Please try a new question.';
+const challenges = new Map(); // challenge_id -> { answer, expiresAt }
+
+function newChallenge() {
+  // Lazy cleanup of expired challenges.
+  const now = Date.now();
+  for (const [id, c] of challenges) {
+    if (c.expiresAt <= now) challenges.delete(id);
+  }
+  const ops = ['+', '-', '×'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a, b, answer;
+  if (op === '×') {
+    a = 2 + Math.floor(Math.random() * 8); // 2–9
+    b = 2 + Math.floor(Math.random() * 8); // 2–9
+    answer = a * b;
+  } else if (op === '+') {
+    a = Math.floor(Math.random() * 21); // 0–20
+    b = Math.floor(Math.random() * 21); // 0–20
+    answer = a + b;
+  } else {
+    a = Math.floor(Math.random() * 21); // 0–20
+    b = Math.floor(Math.random() * (a + 1)); // 0–a, so the result is >= 0
+    answer = a - b;
+  }
+  const id = uuid();
+  challenges.set(id, { answer, expiresAt: now + CHALLENGE_TTL_MS });
+  return { challenge_id: id, question: `What is ${a} ${op} ${b}?` };
+}
+
+// Single-use: the challenge is deleted whether the answer is right or wrong.
+function verifyChallenge(req) {
+  const id = req.body.challenge_id;
+  const given = req.body.captcha_answer;
+  if (typeof id !== 'string' || id === '') return false;
+  const c = challenges.get(id);
+  challenges.delete(id);
+  if (!c || c.expiresAt <= Date.now()) return false;
+  const n = typeof given === 'string' ? given.trim() : given;
+  if (n === '' || n === null || n === undefined) return false;
+  return Number(n) === c.answer;
+}
+
+// ---------------------------------------------------------------------------
+// Simple per-IP rate limits (in-memory)
+// ---------------------------------------------------------------------------
+// server.js sets `trust proxy`, so behind Render req.ip is the real client IP.
+
+const CHALLENGE_LIMIT = { windowMs: 60 * 1000, max: 30 }; // challenge fetches
+const AUTH_FAIL_LIMIT = { windowMs: 15 * 60 * 1000, max: 10 }; // failed logins
+const challengeHits = new Map(); // ip -> { count, resetAt }
+const authFails = new Map(); // ip -> { count, resetAt }
+
+// Counts one hit; returns true when the caller is over the limit.
+function hitLimit(store, ip, limit) {
+  const now = Date.now();
+  let rec = store.get(ip);
+  if (!rec || rec.resetAt <= now) {
+    rec = { count: 0, resetAt: now + limit.windowMs };
+    store.set(ip, rec);
+  }
+  rec.count += 1;
+  return rec.count > limit.max;
+}
+
+// ---------------------------------------------------------------------------
 // Post serialization + pagination helpers
 // ---------------------------------------------------------------------------
 
@@ -165,7 +238,15 @@ function pageNewest(baseSql, whereSql, params, viewerId, cursor, limit) {
 // Auth
 // ---------------------------------------------------------------------------
 
+router.get('/auth/challenge', (req, res, next) => {
+  if (hitLimit(challengeHits, req.ip, CHALLENGE_LIMIT)) {
+    return next(httpError(429, 'Too many requests. Please wait a moment and try again.'));
+  }
+  res.json(newChallenge());
+});
+
 router.post('/auth/register', (req, res, next) => {
+  if (!verifyChallenge(req)) return next(httpError(400, MATH_CHECK_ERROR));
   const displayName = (req.body.display_name || '').trim();
   const email = (req.body.email || '').trim().toLowerCase();
   const password = req.body.password || '';
@@ -191,13 +272,18 @@ router.post('/auth/register', (req, res, next) => {
 });
 
 router.post('/auth/login', (req, res, next) => {
+  if (!verifyChallenge(req)) return next(httpError(400, MATH_CHECK_ERROR));
   const email = (req.body.email || '').trim().toLowerCase();
   const password = req.body.password || '';
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   // Same generic error for unknown email and wrong password.
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    if (hitLimit(authFails, req.ip, AUTH_FAIL_LIMIT)) {
+      return next(httpError(429, 'Too many login attempts. Try again in a few minutes.'));
+    }
     return next(httpError(401, GENERIC_AUTH_ERROR));
   }
+  authFails.delete(req.ip);
   const token = createSession(user.id);
   res.json({ user: publicUser(user), token });
 });

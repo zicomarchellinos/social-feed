@@ -10,6 +10,8 @@ require('./src/db');
 const api = require('./src/routes');
 
 const app = express();
+// Behind Render's proxy; lets req.ip be the real client IP for rate limiting.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '1mb' }));

@@ -153,6 +153,7 @@ function showAuth(mode, dir) {
         <form id="auth-form" onsubmit="return doLogin(event)">
           <div class="field"><label>Password</label>
             <input type="password" name="password" required autocomplete="current-password" placeholder="Your password" autofocus></div>
+          ${captchaFieldHtml()}
           <button class="btn-primary" id="auth-submit" type="submit">Log in</button>
         </form>
       </div>`) : `
@@ -166,14 +167,58 @@ function showAuth(mode, dir) {
           <div class="hint">At least 8 characters.</div></div>
         <div class="field"><label>Confirm password</label>
           <input type="password" name="confirm" required minlength="8" autocomplete="new-password" placeholder="Repeat your password"></div>
+        ${captchaFieldHtml()}
         <button class="btn-primary" id="auth-submit" type="submit">Create account</button>
       </form>`}
     </div>`;
+  // Fetch a fresh math question whenever the form shows one.
+  if ((mode === 'login' && step === 2) || mode === 'register') loadChallenge();
 }
 
 function authError(msg) {
   const el = document.getElementById('auth-error');
   if (el) el.textContent = msg || '';
+}
+
+// ---------------------------------------------------------------------------
+// Math CAPTCHA: the question comes from the server; the answer never does.
+// ---------------------------------------------------------------------------
+
+async function loadChallenge() {
+  const q = document.getElementById('captcha-question');
+  try {
+    state.challenge = await api('/api/auth/challenge');
+    if (q) q.textContent = state.challenge.question;
+  } catch (err) {
+    state.challenge = null;
+    if (q) q.textContent = 'Could not load the security check. Tap refresh to retry.';
+  }
+}
+
+async function refreshChallenge(e) {
+  if (e) e.preventDefault();
+  const input = document.querySelector('input[name="captcha_answer"]');
+  if (input) input.value = '';
+  const q = document.getElementById('captcha-question');
+  if (q) q.textContent = 'Loading…';
+  await loadChallenge();
+  if (input) input.focus();
+}
+
+// After a failed math check: fresh question, clear only the answer.
+function onCaptchaFailed() {
+  refreshChallenge();
+}
+
+function captchaFieldHtml() {
+  return `
+    <div class="captcha-box">
+      <div class="captcha-question" id="captcha-question">Loading…</div>
+      <div class="captcha-row">
+        <input type="text" name="captcha_answer" required inputmode="numeric" autocomplete="off" placeholder="Your answer">
+        <button class="captcha-refresh" type="button" onclick="refreshChallenge(event)" title="New question" aria-label="New question">↻</button>
+      </div>
+    </div>`;
 }
 
 // Login step 1 -> 2: only advance when the email is non-empty and well-formed.
@@ -212,12 +257,20 @@ async function doLogin(e) {
   try {
     const { user, token } = await api('/api/auth/login', {
       method: 'POST',
-      body: { email: state.loginEmail, password: f.get('password') },
+      body: {
+        email: state.loginEmail,
+        password: f.get('password'),
+        challenge_id: state.challenge ? state.challenge.challenge_id : null,
+        captcha_answer: f.get('captcha_answer'),
+      },
     });
     enterApp(user, token);
   } catch (err) {
     authError(err.message);
     btn.disabled = false;
+    // The challenge is single-use: any failed submit spent it, so a fresh
+    // question is needed even when the failure was a wrong password.
+    onCaptchaFailed();
   }
   return false;
 }
@@ -239,12 +292,17 @@ async function doRegister(e) {
         display_name: f.get('display_name'),
         email: f.get('email'),
         password: f.get('password'),
+        challenge_id: state.challenge ? state.challenge.challenge_id : null,
+        captcha_answer: f.get('captcha_answer'),
       },
     });
     enterApp(user, token);
   } catch (err) {
     authError(err.message);
     btn.disabled = false;
+    // The challenge is single-use: any failed submit spent it, so a fresh
+    // question is needed even when the failure was not the math itself.
+    onCaptchaFailed();
   }
   return false;
 }

@@ -260,6 +260,24 @@ img { display: block; }
   font-size: 14px; z-index: 60; max-width: 90%; text-align: center;
 }
 
+/* ---------- Math CAPTCHA ---------- */
+.captcha-box {
+  background: var(--input-bg); border: 1px solid var(--divider);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 12px;
+}
+.captcha-question { font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+.captcha-row { display: flex; gap: 8px; }
+.captcha-row input {
+  flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--divider);
+  border-radius: var(--radius); background: var(--bg); color: var(--text); outline: none;
+}
+.captcha-row input:focus { border-color: var(--accent); }
+.captcha-refresh {
+  width: 44px; min-height: 44px; border: 1px solid var(--divider);
+  border-radius: var(--radius); background: var(--bg); color: var(--text);
+  font-size: 20px; flex-shrink: 0;
+}
+
 /* ---------- Stepped login ---------- */
 .auth-email-chip {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -301,7 +319,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 @media (max-width: 480px) {
   /* 16px inputs stop iOS Safari auto-zooming on focus. */
   .field input, .field textarea, .search-box input,
-  .comment-form input, .thread-composer input { font-size: 16px; }
+  .comment-form input, .thread-composer input,
+  .captcha-row input { font-size: 16px; }
 
   .auth-wrap { padding: 32px 16px 16px; }
   .auth-logo { font-size: 28px; }
