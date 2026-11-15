@@ -379,3 +379,192 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   }
   .comment-form button, .thread-composer button { min-height: 44px; padding: 0 8px; }
 }
+
+/* ---------- Super-app home + Wallet ---------- */
+.home-greet { display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; }
+.home-hi { font-size: 19px; font-weight: 700; }
+.home-sub { color: var(--muted); font-size: 13px; }
+
+.balance-card {
+  margin: 8px 16px 4px; padding: 16px; border: 1px solid var(--divider);
+  border-radius: 12px; background: var(--bg);
+}
+.balance-top { display: flex; align-items: center; justify-content: space-between; }
+.balance-label { color: var(--muted); font-size: 13px; font-weight: 600; }
+.eye-btn { background: none; border: none; color: var(--muted); padding: 8px; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.balance-amount { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; margin: 4px 0; }
+
+.quick-actions {
+  display: flex; justify-content: space-around; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--divider);
+}
+.qa-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  background: none; border: none; color: var(--text); padding: 4px 0; min-height: 64px;
+}
+.qa-icon {
+  width: 52px; height: 52px; border-radius: 50%; background: var(--input-bg);
+  border: 1px solid var(--divider); display: flex; align-items: center; justify-content: center;
+  color: var(--accent);
+}
+.qa-label { font-size: 12px; font-weight: 600; }
+
+.services-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--divider);
+}
+.service-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  background: var(--input-bg); border: 1px solid var(--divider); border-radius: 12px;
+  padding: 14px 4px; color: var(--text); font-size: 12px; font-weight: 600; min-height: 76px;
+}
+.service-icon { color: var(--text); }
+
+/* Transaction rows */
+.tx-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: none; border: none; border-bottom: 1px solid var(--divider);
+  padding: 12px 16px; color: var(--text); min-height: 64px;
+}
+.tx-icon {
+  width: 40px; height: 40px; border-radius: 50%; background: var(--input-bg);
+  border: 1px solid var(--divider); display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; color: var(--text);
+}
+.tx-main { flex: 1; min-width: 0; }
+.tx-name { display: block; font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx-sub { display: block; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx-amount { font-weight: 700; font-size: 15px; flex-shrink: 0; white-space: nowrap; }
+.tx-amount.in { color: #1a7f37; }
+
+.filter-chips { display: flex; gap: 8px; padding: 12px 16px; flex-wrap: wrap; }
+.chip {
+  padding: 8px 16px; border: 1px solid var(--divider); border-radius: 999px;
+  background: var(--bg); color: var(--text); font-size: 14px; font-weight: 600; min-height: 36px;
+}
+.chip.active { background: var(--text); color: #fff; border-color: var(--text); }
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* Amount entry */
+.amount-section { padding: 16px; }
+.field-label { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.amount-wrap {
+  display: flex; align-items: baseline; gap: 6px;
+  border-bottom: 2px solid var(--divider); padding: 4px 0;
+}
+.amount-wrap:focus-within { border-bottom-color: var(--accent); }
+.amount-prefix { font-size: 22px; font-weight: 700; }
+.amount-input {
+  flex: 1; min-width: 0; border: none; outline: none; background: transparent;
+  color: var(--text); font-size: 28px; font-weight: 700; padding: 4px 0;
+}
+
+/* Detail / confirm rows */
+.detail-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--divider); font-size: 15px;
+}
+.detail-row:last-child { border-bottom: none; }
+.detail-row > span:first-child { color: var(--muted); flex-shrink: 0; }
+.detail-row > span:last-child { text-align: right; word-break: break-word; }
+.detail-strong { font-weight: 700; }
+.confirm-card { margin: 12px 16px; padding: 16px; border: 1px solid var(--divider); border-radius: 12px; }
+.confirm-recipient { display: flex; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--divider); margin-bottom: 4px; }
+.send-recipient { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--divider); }
+
+/* Transaction detail */
+.tx-detail { padding: 20px 16px; }
+.tx-detail-amount { font-size: 32px; font-weight: 700; text-align: center; }
+.tx-detail-amount.in { color: #1a7f37; }
+.tx-detail-type { text-align: center; color: var(--muted); font-size: 14px; margin: 6px 0 16px; }
+
+/* QR */
+.qr-box {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 24px 16px; text-align: center;
+}
+.qr-img { border: 1px solid var(--divider); border-radius: 12px; padding: 12px; background: #fff; max-width: 100%; height: auto; }
+.qr-name { font-size: 17px; font-weight: 700; }
+.qr-amount { font-size: 26px; font-weight: 700; }
+.qr-note { color: var(--muted); font-size: 14px; }
+.qr-countdown { font-weight: 700; color: var(--accent); font-size: 15px; }
+
+/* Scan */
+.scan-box {
+  position: relative; margin: 12px 16px; border-radius: 12px; overflow: hidden;
+  background: #000; aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center;
+}
+.scan-box video { width: 100%; height: 100%; object-fit: cover; }
+.scan-frame {
+  position: absolute; width: 70%; aspect-ratio: 1; border: 2px solid #fff;
+  border-radius: 12px; pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+}
+.scan-hint {
+  position: absolute; bottom: 12px; left: 12px; right: 12px; text-align: center;
+  color: #fff; font-size: 13px; text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+/* PIN entry */
+.pin-screen { padding: 24px 16px; text-align: center; }
+.pin-prompt { font-size: 15px; color: var(--muted); margin-bottom: 24px; }
+.pin-prompt b { color: var(--text); }
+.pin-entry { position: relative; display: inline-block; }
+.pin-boxes { display: flex; gap: 10px; justify-content: center; }
+.pin-box {
+  width: 46px; height: 56px; border: 1px solid var(--divider); border-radius: 10px;
+  background: var(--input-bg); display: inline-flex; align-items: center; justify-content: center;
+  font-size: 28px;
+}
+.pin-box.filled { border-color: var(--accent); background: var(--bg); }
+.pin-box.filled::after { content: "•"; }
+.pin-hidden-input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; border: none; font-size: 16px;
+}
+
+/* Top-up methods + demo notice */
+.demo-notice {
+  margin: 12px 16px; padding: 12px; border-radius: 8px;
+  background: #fff8e1; border: 1px solid #ffe082; color: #7a5c00; font-size: 14px;
+}
+.method-card {
+  display: flex; align-items: center; gap: 12px; text-align: left;
+  background: var(--bg); border: 1px solid var(--divider); border-radius: 12px;
+  padding: 12px 14px; color: var(--text); min-height: 64px;
+}
+.method-card.selected { border-color: var(--accent); }
+.method-icon {
+  width: 40px; height: 40px; border-radius: 50%; background: var(--input-bg);
+  border: 1px solid var(--divider); display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; color: var(--text);
+}
+.method-main { flex: 1; min-width: 0; }
+.method-label { display: block; font-weight: 600; font-size: 15px; }
+.method-sub { display: block; color: var(--muted); font-size: 13px; }
+.method-check { color: var(--accent); flex-shrink: 0; }
+
+/* Success screens */
+.success-screen { padding: 40px 16px; text-align: center; }
+.success-check {
+  width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 16px;
+  background: #e8f5e9; color: #1a7f37; display: flex; align-items: center; justify-content: center;
+}
+.success-title { font-size: 20px; font-weight: 700; }
+.success-amount { font-size: 32px; font-weight: 700; margin: 8px 0 4px; }
+.success-sub { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+
+/* Phones (<=480px): wallet components stay compact, no horizontal overflow. */
+@media (max-width: 480px) {
+  .balance-amount { font-size: 26px; }
+  .qa-icon { width: 48px; height: 48px; }
+  .services-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 10px 12px; }
+  .service-tile { padding: 12px 2px; font-size: 11px; min-height: 70px; }
+  .pin-box { width: 40px; height: 50px; }
+  .pin-boxes { gap: 8px; }
+  .amount-input { font-size: 24px; }
+  .tx-row, .send-recipient { padding-left: 12px; padding-right: 12px; }
+  .balance-card { margin-left: 12px; margin-right: 12px; }
+  .scan-box { margin-left: 12px; margin-right: 12px; }
+  .confirm-card { margin-left: 12px; margin-right: 12px; }
+}

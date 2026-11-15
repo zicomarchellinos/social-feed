@@ -35,9 +35,10 @@ const MAX_NAME_CHARS = 50;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GENERIC_AUTH_ERROR = 'Email or password is incorrect.';
 
-function httpError(status, message) {
+function httpError(status, message, code) {
   const err = new Error(message);
   err.status = status;
+  if (code) err.code = code;
   return err;
 }
 
@@ -801,6 +802,554 @@ router.get('/communities/:id/posts', requireAuth, (req, res, next) => {
   const page = pageNewest(POST_SELECT, 'p.community_id = ?', [req.params.id],
     req.user.id, req.query.cursor, limit);
   res.json({ posts: page.items, next_cursor: page.next_cursor });
+});
+
+// ---------------------------------------------------------------------------
+// Wallet (SF Wallet)
+// ---------------------------------------------------------------------------
+// Demo money in Indonesian rupiah, INTEGER amounts only — never floats.
+// Deposits are SIMULATED: no payment gateway is connected, no real money
+// moves. Every money movement is one SQLite transaction with a conditional
+// debit (balance guard), and every mutating endpoint honors idempotency keys.
+
+const MIN_AMOUNT_IDR = 1000;
+const MAX_AMOUNT_IDR = 5000000;
+const DEPOSIT_METHODS = ['bank_transfer', 'e_wallet', 'virtual_account'];
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCK_MS = 15 * 60 * 1000; // 15 minutes
+const PAYMENT_REQUEST_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const QR_PREFIX = 'SF-PAY:';
+
+function getOrCreateWallet(userId) {
+  let w = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(userId);
+  if (w) return w;
+  const now = nowIso();
+  db.prepare(
+    `INSERT OR IGNORE INTO wallets (id, user_id, balance_idr, receive_token, created_at, updated_at)
+     VALUES (?, ?, 0, ?, ?, ?)`
+  ).run(uuid(), userId, uuid(), now, now);
+  return db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(userId);
+}
+
+function validateAmount(value) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    return 'Amount must be a whole number of rupiah.';
+  }
+  if (value < MIN_AMOUNT_IDR || value > MAX_AMOUNT_IDR) {
+    return 'Amount must be between Rp1.000 and Rp5.000.000.';
+  }
+  return null;
+}
+
+function validIdempotencyKey(key) {
+  return key === undefined
+    || (typeof key === 'string' && key.length >= 1 && key.length <= 128);
+}
+
+const TX_SELECT = `
+  SELECT t.*,
+         su.id AS sender_user_id, su.display_name AS sender_name, su.avatar_url AS sender_avatar,
+         ru.id AS recipient_user_id, ru.display_name AS recipient_name, ru.avatar_url AS recipient_avatar
+  FROM transactions t
+  LEFT JOIN wallets sw ON sw.id = t.sender_wallet_id
+  LEFT JOIN users su ON su.id = sw.user_id
+  LEFT JOIN wallets rw ON rw.id = t.recipient_wallet_id
+  LEFT JOIN users ru ON ru.id = rw.user_id
+`;
+
+function getTx(id) {
+  return db.prepare(`${TX_SELECT} WHERE t.id = ?`).get(id);
+}
+
+function serializeTransaction(row, viewerWalletId) {
+  const out = row.sender_wallet_id === viewerWalletId;
+  const cp = out
+    ? { id: row.recipient_user_id, display_name: row.recipient_name, avatar_url: row.recipient_avatar }
+    : { id: row.sender_user_id, display_name: row.sender_name, avatar_url: row.sender_avatar };
+  return {
+    id: row.id,
+    type: row.type,
+    status: row.status,
+    direction: out ? 'out' : 'in',
+    amount_idr: row.amount_idr,
+    fee_idr: row.fee_idr,
+    method: row.method || null,
+    reference: row.reference || null,
+    description: row.description || null,
+    counterparty: cp.id
+      ? { id: cp.id, display_name: cp.display_name, avatar_url: cp.avatar_url || null }
+      : null,
+    created_at: row.created_at,
+  };
+}
+
+function findIdempotentTx(walletId, key) {
+  if (!key) return null;
+  return db.prepare(
+    `SELECT * FROM transactions
+     WHERE idempotency_key = ? AND (sender_wallet_id = ? OR recipient_wallet_id = ?)`
+  ).get(key, walletId, walletId);
+}
+
+function idempotencyMatches(row, expected) {
+  return row.type === expected.type
+    && row.amount_idr === expected.amount
+    && row.sender_wallet_id === (expected.senderWalletId || null)
+    && row.recipient_wallet_id === (expected.recipientWalletId || null)
+    && (row.method || null) === (expected.method || null)
+    && (row.description || null) === (expected.description || null);
+}
+
+// Returns the idempotent replay response when the key was already used,
+// or null when this is a fresh request. Throws (via next) on mismatch.
+function idempotentReplay(res, walletId, key, expected) {
+  const existing = findIdempotentTx(walletId, key);
+  if (!existing) return {};
+  if (!idempotencyMatches(existing, expected)) {
+    return { conflict: true };
+  }
+  const fresh = db.prepare('SELECT balance_idr FROM wallets WHERE id = ?').get(walletId);
+  res.json({
+    balance_idr: fresh.balance_idr,
+    transaction: serializeTransaction(getTx(existing.id), walletId),
+  });
+  return { replayed: true };
+}
+
+// PIN check for money-out operations. Returns null when the PIN verifies,
+// otherwise the httpError to return. Wrong PINs count toward a 15-minute
+// lock; a correct PIN resets the counter. Never logs PINs.
+function checkWalletPin(wallet, pin) {
+  if (!wallet.pin_hash) {
+    return httpError(403, 'Set a wallet PIN before sending money.', 'PIN_REQUIRED');
+  }
+  if (wallet.pin_locked_until && new Date(wallet.pin_locked_until).getTime() > Date.now()) {
+    return httpError(429, 'Too many wrong PIN attempts. Wallet locked for 15 minutes.');
+  }
+  if (wallet.pin_locked_until) {
+    // Lock expired: clear it.
+    db.prepare('UPDATE wallets SET pin_attempts = 0, pin_locked_until = NULL, updated_at = ? WHERE id = ?')
+      .run(nowIso(), wallet.id);
+    wallet.pin_attempts = 0;
+    wallet.pin_locked_until = null;
+  }
+  if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) {
+    return httpError(400, 'Enter your 6-digit wallet PIN.');
+  }
+  if (!bcrypt.compareSync(pin, wallet.pin_hash)) {
+    const attempts = (wallet.pin_attempts || 0) + 1;
+    if (attempts >= PIN_MAX_ATTEMPTS) {
+      const lockedUntil = new Date(Date.now() + PIN_LOCK_MS).toISOString();
+      db.prepare('UPDATE wallets SET pin_attempts = ?, pin_locked_until = ?, updated_at = ? WHERE id = ?')
+        .run(attempts, lockedUntil, nowIso(), wallet.id);
+      return httpError(429, 'Too many wrong PIN attempts. Wallet locked for 15 minutes.');
+    }
+    db.prepare('UPDATE wallets SET pin_attempts = ?, updated_at = ? WHERE id = ?')
+      .run(attempts, nowIso(), wallet.id);
+    const left = PIN_MAX_ATTEMPTS - attempts;
+    return httpError(400, `Incorrect PIN. ${left} ${left === 1 ? 'attempt' : 'attempts'} left.`);
+  }
+  if (wallet.pin_attempts) {
+    db.prepare('UPDATE wallets SET pin_attempts = 0, pin_locked_until = NULL, updated_at = ? WHERE id = ?')
+      .run(nowIso(), wallet.id);
+  }
+  return null;
+}
+
+// Atomic money-out: conditional debit (balance guard), credit, ledger row,
+// plus an optional extra step inside the same transaction (e.g. redeeming
+// a payment request). Throws httpError on insufficient funds; the caller
+// maps SQLITE_CONSTRAINT_UNIQUE to 409.
+function executeTransfer({ type, senderWallet, recipientWallet, amount, description, reference, idempotencyKey, txId, extra }) {
+  const run = db.transaction(() => {
+    const now = nowIso();
+    const debit = db.prepare(
+      `UPDATE wallets SET balance_idr = balance_idr - ?, updated_at = ?
+       WHERE id = ? AND balance_idr >= ?`
+    ).run(amount, now, senderWallet.id, amount);
+    if (debit.changes !== 1) throw httpError(400, 'Insufficient balance.');
+    db.prepare(
+      'UPDATE wallets SET balance_idr = balance_idr + ?, updated_at = ? WHERE id = ?'
+    ).run(amount, now, recipientWallet.id);
+    db.prepare(
+      `INSERT INTO transactions (id, idempotency_key, type, status, sender_wallet_id, recipient_wallet_id, amount_idr, fee_idr, reference, description, created_at)
+       VALUES (?, ?, ?, 'completed', ?, ?, ?, 0, ?, ?, ?)`
+    ).run(txId, idempotencyKey || null, type, senderWallet.id, recipientWallet.id,
+      amount, reference || null, description || null, now);
+    if (extra) extra();
+    return txId;
+  });
+  return run();
+}
+
+function resolveRecipient(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const v = value.trim();
+  if (validEmail(v)) {
+    return db.prepare('SELECT * FROM users WHERE email = ?').get(v.toLowerCase()) || null;
+  }
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(v) || null;
+}
+
+// QR payloads look like SF-PAY:<uuid>. The token is either a wallet's
+// static receive_token (open amount) or a payment_requests token
+// (fixed amount, single-use, 15-minute expiry).
+function parsePayloadToken(payload) {
+  if (typeof payload !== 'string') return null;
+  const m = new RegExp(`^${QR_PREFIX}([0-9a-fA-F-]{36})$`).exec(payload.trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Looks the token up without checking expiry/redeemed state (the caller
+// decides which state checks apply — a pay retry must still find a
+// redeemed request to replay its idempotent result).
+function lookupPayloadTarget(token) {
+  const reqRow = db.prepare('SELECT * FROM payment_requests WHERE token = ?').get(token);
+  if (reqRow) {
+    const user = db.prepare(
+      'SELECT id, display_name, avatar_url, verified_at FROM users WHERE id = ?'
+    ).get(reqRow.recipient_user_id);
+    if (!user) return null;
+    return {
+      kind: 'request', token, recipient: user,
+      amount_idr: reqRow.amount_idr, note: reqRow.note,
+      expires_at: reqRow.expires_at, redeemed_at: reqRow.redeemed_at,
+    };
+  }
+  const w = db.prepare('SELECT * FROM wallets WHERE receive_token = ?').get(token);
+  if (w) {
+    const user = db.prepare(
+      'SELECT id, display_name, avatar_url, verified_at FROM users WHERE id = ?'
+    ).get(w.user_id);
+    if (!user) return null;
+    return {
+      kind: 'receive', token, recipient: user,
+      amount_idr: null, note: null, expires_at: null, redeemed_at: null,
+    };
+  }
+  return null;
+}
+
+function resolvePayload(payload) {
+  const token = parsePayloadToken(payload);
+  if (!token) {
+    throw httpError(400, 'Invalid QR code. Make sure you scanned a Social Feed payment code.');
+  }
+  const target = lookupPayloadTarget(token);
+  if (!target) {
+    throw httpError(400, 'QR code not recognized. Make sure you scanned a Social Feed payment code.');
+  }
+  if (target.kind === 'request') {
+    if (target.redeemed_at) throw httpError(400, 'This payment request was already used.');
+    if (new Date(target.expires_at).getTime() <= Date.now()) {
+      throw httpError(400, 'This payment request has expired.');
+    }
+  }
+  return target;
+}
+
+function publicRecipient(user) {
+  return {
+    id: user.id, display_name: user.display_name,
+    avatar_url: user.avatar_url || null, verified_at: user.verified_at,
+  };
+}
+
+// --- Wallet summary (creates the wallet lazily) ---
+router.get('/wallet', requireAuth, (req, res) => {
+  const wallet = getOrCreateWallet(req.user.id);
+  res.json({
+    balance_idr: wallet.balance_idr,
+    has_pin: !!wallet.pin_hash,
+    receive_token: wallet.receive_token,
+  });
+});
+
+// --- Transaction history, newest first, cursor-paginated ---
+// ?filter=all|in|out|deposit, ?limit (max 50), ?before=<cursor>
+router.get('/wallet/transactions', requireAuth, (req, res) => {
+  const wallet = getOrCreateWallet(req.user.id);
+  const limit = parseLimit(req.query.limit, 20, 50);
+  const filter = ['in', 'out', 'deposit'].includes(req.query.filter) ? req.query.filter : 'all';
+  const c = decodeCursor(req.query.before || req.query.cursor);
+  const conditions = [];
+  const params = [];
+  if (filter === 'in') {
+    conditions.push('t.recipient_wallet_id = ?');
+    params.push(wallet.id);
+  } else if (filter === 'out') {
+    conditions.push('t.sender_wallet_id = ?');
+    params.push(wallet.id);
+  } else if (filter === 'deposit') {
+    conditions.push("t.type = 'deposit'");
+    conditions.push('t.recipient_wallet_id = ?');
+    params.push(wallet.id);
+  } else {
+    conditions.push('(t.sender_wallet_id = ? OR t.recipient_wallet_id = ?)');
+    params.push(wallet.id, wallet.id);
+  }
+  if (c) {
+    conditions.push('(t.created_at < ? OR (t.created_at = ? AND t.id < ?))');
+    params.push(c.createdAt, c.createdAt, c.id);
+  }
+  const rows = db.prepare(
+    `${TX_SELECT} WHERE ${conditions.join(' AND ')}
+     ORDER BY t.created_at DESC, t.id DESC LIMIT ?`
+  ).all(...params, limit + 1);
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  res.json({
+    transactions: page.map((r) => serializeTransaction(r, wallet.id)),
+    next_cursor: hasMore
+      ? encodeCursor(page[page.length - 1].created_at, page[page.length - 1].id)
+      : null,
+  });
+});
+
+// --- Simulated top-up (demo: no real money moves) ---
+router.post('/wallet/deposits', requireAuth, (req, res, next) => {
+  const amountErr = validateAmount(req.body.amountIdr);
+  if (amountErr) return next(httpError(400, amountErr));
+  const amount = req.body.amountIdr;
+  const method = req.body.method;
+  if (!DEPOSIT_METHODS.includes(method)) return next(httpError(400, 'Choose a top-up method.'));
+  const key = req.body.idempotencyKey;
+  if (!validIdempotencyKey(key)) return next(httpError(400, 'Invalid idempotency key.'));
+  const wallet = getOrCreateWallet(req.user.id);
+  if (key) {
+    const replay = idempotentReplay(res, wallet.id, key, {
+      type: 'deposit', amount, senderWalletId: null,
+      recipientWalletId: wallet.id, method, description: null,
+    });
+    if (replay.conflict) return next(httpError(409, 'This request was already used with different details.'));
+    if (replay.replayed) return;
+  }
+  const now = nowIso();
+  const id = uuid();
+  const reference = 'DEP-' + id.slice(0, 8).toUpperCase();
+  const run = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO transactions (id, idempotency_key, type, status, sender_wallet_id, recipient_wallet_id, amount_idr, fee_idr, method, reference, description, created_at)
+       VALUES (?, ?, 'deposit', 'completed', NULL, ?, ?, 0, ?, ?, NULL, ?)`
+    ).run(id, key || null, wallet.id, amount, method, reference, now);
+    db.prepare('UPDATE wallets SET balance_idr = balance_idr + ?, updated_at = ? WHERE id = ?')
+      .run(amount, now, wallet.id);
+  });
+  try {
+    run();
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return next(httpError(409, 'This request was already processed.'));
+    }
+    throw e;
+  }
+  const fresh = db.prepare('SELECT balance_idr FROM wallets WHERE id = ?').get(wallet.id);
+  res.status(201).json({
+    balance_idr: fresh.balance_idr,
+    transaction: serializeTransaction(getTx(id), wallet.id),
+  });
+});
+
+// --- Send money to another user (by user id or email) ---
+router.post('/wallet/transfers', requireAuth, (req, res, next) => {
+  const amountErr = validateAmount(req.body.amountIdr);
+  if (amountErr) return next(httpError(400, amountErr));
+  const amount = req.body.amountIdr;
+  const description = req.body.description === undefined
+    ? null : String(req.body.description).trim() || null;
+  if (description && description.length > 200) {
+    return next(httpError(400, 'Note is too long (max 200 characters).'));
+  }
+  const key = req.body.idempotencyKey;
+  if (!validIdempotencyKey(key)) return next(httpError(400, 'Invalid idempotency key.'));
+  const recipient = resolveRecipient(req.body.recipient);
+  if (!recipient) return next(httpError(404, 'Recipient not found.'));
+  if (recipient.id === req.user.id) {
+    return next(httpError(400, 'You cannot send money to yourself.'));
+  }
+  const senderWallet = getOrCreateWallet(req.user.id);
+  const recipientWallet = getOrCreateWallet(recipient.id);
+  if (key) {
+    const replay = idempotentReplay(res, senderWallet.id, key, {
+      type: 'transfer', amount, senderWalletId: senderWallet.id,
+      recipientWalletId: recipientWallet.id, method: null, description,
+    });
+    if (replay.conflict) return next(httpError(409, 'This request was already used with different details.'));
+    if (replay.replayed) return;
+  }
+  const pinErr = checkWalletPin(senderWallet, req.body.pin);
+  if (pinErr) return next(pinErr);
+  if (senderWallet.balance_idr < amount) {
+    return next(httpError(400, 'Insufficient balance. Top up first or send a smaller amount.'));
+  }
+  const id = uuid();
+  const reference = 'TRF-' + id.slice(0, 8).toUpperCase();
+  let txId;
+  try {
+    txId = executeTransfer({
+      type: 'transfer', senderWallet, recipientWallet, amount,
+      description, reference, idempotencyKey: key || null, txId: id,
+    });
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return next(httpError(409, 'This request was already processed.'));
+    }
+    throw e;
+  }
+  const fresh = db.prepare('SELECT balance_idr FROM wallets WHERE id = ?').get(senderWallet.id);
+  res.status(201).json({
+    balance_idr: fresh.balance_idr,
+    transaction: serializeTransaction(getTx(txId), senderWallet.id),
+  });
+});
+
+// --- Set or change the 6-digit wallet PIN ---
+router.post('/wallet/pin', requireAuth, (req, res, next) => {
+  const pin = req.body.pin;
+  if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) {
+    return next(httpError(400, 'PIN must be exactly 6 digits.'));
+  }
+  const wallet = getOrCreateWallet(req.user.id);
+  if (wallet.pin_locked_until && new Date(wallet.pin_locked_until).getTime() > Date.now()) {
+    return next(httpError(429, 'Too many wrong PIN attempts. Wallet locked for 15 minutes.'));
+  }
+  if (wallet.pin_hash) {
+    const current = req.body.currentPin;
+    if (typeof current !== 'string' || !bcrypt.compareSync(current, wallet.pin_hash)) {
+      return next(httpError(400, 'Current PIN is incorrect.'));
+    }
+  }
+  db.prepare(
+    'UPDATE wallets SET pin_hash = ?, pin_attempts = 0, pin_locked_until = NULL, updated_at = ? WHERE id = ?'
+  ).run(bcrypt.hashSync(pin, 10), nowIso(), wallet.id);
+  res.json({ ok: true, has_pin: true });
+});
+
+// --- Static receive QR (open amount; the payer chooses) ---
+router.get('/wallet/receive-qr', requireAuth, (req, res) => {
+  const wallet = getOrCreateWallet(req.user.id);
+  res.json({
+    payload: QR_PREFIX + wallet.receive_token,
+    display_name: req.user.display_name,
+  });
+});
+
+// --- Create a fixed-amount payment request (QR), 15-minute expiry ---
+router.post('/wallet/payment-requests', requireAuth, (req, res, next) => {
+  const amountErr = validateAmount(req.body.amountIdr);
+  if (amountErr) return next(httpError(400, amountErr));
+  const amount = req.body.amountIdr;
+  const note = req.body.note === undefined ? null : String(req.body.note).trim() || null;
+  if (note && note.length > 200) {
+    return next(httpError(400, 'Note is too long (max 200 characters).'));
+  }
+  const token = uuid();
+  const now = nowIso();
+  const expiresAt = new Date(Date.now() + PAYMENT_REQUEST_TTL_MS).toISOString();
+  db.prepare(
+    `INSERT INTO payment_requests (token, recipient_user_id, amount_idr, note, expires_at, redeemed_at, created_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?)`
+  ).run(token, req.user.id, amount, note, expiresAt, now);
+  res.status(201).json({
+    token, payload: QR_PREFIX + token, amount_idr: amount, expires_at: expiresAt,
+  });
+});
+
+// --- Resolve a scanned QR payload (before the payer confirms) ---
+router.post('/wallet/resolve-qr', requireAuth, (req, res, next) => {
+  let target;
+  try {
+    target = resolvePayload(req.body.payload);
+  } catch (e) {
+    return next(e);
+  }
+  res.json({
+    kind: target.kind,
+    recipient: publicRecipient(target.recipient),
+    amount_idr: target.amount_idr,
+    note: target.note,
+    expires_at: target.expires_at,
+  });
+});
+
+// --- Pay a QR code (fixed request or open receive QR) ---
+router.post('/wallet/pay', requireAuth, (req, res, next) => {
+  const token = parsePayloadToken(req.body.payload);
+  if (!token) {
+    return next(httpError(400, 'Invalid QR code. Make sure you scanned a Social Feed payment code.'));
+  }
+  const target = lookupPayloadTarget(token);
+  if (!target) {
+    return next(httpError(400, 'QR code not recognized. Make sure you scanned a Social Feed payment code.'));
+  }
+  if (target.recipient.id === req.user.id) {
+    return next(httpError(400, 'You cannot pay yourself.'));
+  }
+  let amount;
+  if (target.kind === 'request') {
+    amount = target.amount_idr;
+    if (req.body.amountIdr !== undefined && req.body.amountIdr !== null
+      && req.body.amountIdr !== amount) {
+      return next(httpError(400, 'Amount does not match the requested amount.'));
+    }
+  } else {
+    const amountErr = validateAmount(req.body.amountIdr);
+    if (amountErr) return next(httpError(400, amountErr));
+    amount = req.body.amountIdr;
+  }
+  const key = req.body.idempotencyKey;
+  if (!validIdempotencyKey(key)) return next(httpError(400, 'Invalid idempotency key.'));
+  const senderWallet = getOrCreateWallet(req.user.id);
+  const recipientWallet = getOrCreateWallet(target.recipient.id);
+  // Idempotency is checked BEFORE the redeemed/expired state checks, so a
+  // retry of a completed pay replays the original result instead of failing
+  // on the (now redeemed) request.
+  if (key) {
+    const replay = idempotentReplay(res, senderWallet.id, key, {
+      type: 'payment', amount, senderWalletId: senderWallet.id,
+      recipientWalletId: recipientWallet.id, method: null, description: target.note,
+    });
+    if (replay.conflict) return next(httpError(409, 'This request was already used with different details.'));
+    if (replay.replayed) return;
+  }
+  if (target.kind === 'request') {
+    if (target.redeemed_at) return next(httpError(400, 'This payment request was already used.'));
+    if (new Date(target.expires_at).getTime() <= Date.now()) {
+      return next(httpError(400, 'This payment request has expired.'));
+    }
+  }
+  const pinErr = checkWalletPin(senderWallet, req.body.pin);
+  if (pinErr) return next(pinErr);
+  if (senderWallet.balance_idr < amount) {
+    return next(httpError(400, 'Insufficient balance. Top up first or pay a smaller amount.'));
+  }
+  const id = uuid();
+  const reference = 'PAY-' + id.slice(0, 8).toUpperCase();
+  let txId;
+  try {
+    txId = executeTransfer({
+      type: 'payment', senderWallet, recipientWallet, amount,
+      description: target.note, reference, idempotencyKey: key || null, txId: id,
+      extra: target.kind === 'request' ? () => {
+        // Redeem inside the same transaction; the NULL check is the race
+        // guard when two payers hit one request at once.
+        const r = db.prepare(
+          'UPDATE payment_requests SET redeemed_at = ? WHERE token = ? AND redeemed_at IS NULL'
+        ).run(nowIso(), target.token);
+        if (r.changes !== 1) throw httpError(400, 'This payment request was already used.');
+      } : null,
+    });
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return next(httpError(409, 'This request was already processed.'));
+    }
+    throw e;
+  }
+  const fresh = db.prepare('SELECT balance_idr FROM wallets WHERE id = ?').get(senderWallet.id);
+  res.status(201).json({
+    balance_idr: fresh.balance_idr,
+    transaction: serializeTransaction(getTx(txId), senderWallet.id),
+  });
 });
 
 module.exports = router;

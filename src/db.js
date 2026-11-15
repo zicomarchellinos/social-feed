@@ -104,6 +104,51 @@ CREATE TABLE IF NOT EXISTS community_members (
   created_at TEXT NOT NULL,
   PRIMARY KEY (community_id, user_id)
 );
+
+-- Wallet (SF Wallet): demo money in Indonesian rupiah, INTEGER amounts
+-- only — never floats. Deposits are SIMULATED: no payment gateway, no real
+-- money moves. A wallet row is created lazily on first wallet access.
+CREATE TABLE IF NOT EXISTS wallets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  balance_idr INTEGER NOT NULL DEFAULT 0 CHECK (balance_idr >= 0),
+  pin_hash TEXT,
+  pin_attempts INTEGER NOT NULL DEFAULT 0,
+  pin_locked_until TEXT,
+  receive_token TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT UNIQUE,
+  type TEXT NOT NULL CHECK (type IN ('deposit', 'transfer', 'payment')),
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  sender_wallet_id TEXT REFERENCES wallets(id),
+  recipient_wallet_id TEXT REFERENCES wallets(id),
+  amount_idr INTEGER NOT NULL CHECK (amount_idr > 0),
+  fee_idr INTEGER NOT NULL DEFAULT 0,
+  method TEXT,
+  reference TEXT,
+  description TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tx_sender ON transactions(sender_wallet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tx_recipient ON transactions(recipient_wallet_id, created_at);
+
+-- Fixed-amount payment requests (QR codes): single-use, 15-minute expiry.
+-- NULL amount_idr is not used here (open amounts use the wallet's static
+-- receive_token instead); the column stays nullable per the spec.
+CREATE TABLE IF NOT EXISTS payment_requests (
+  token TEXT PRIMARY KEY,
+  recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount_idr INTEGER,
+  note TEXT,
+  expires_at TEXT NOT NULL,
+  redeemed_at TEXT,
+  created_at TEXT NOT NULL
+);
 `);
 
 // Public user object: never includes password_hash.

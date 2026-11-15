@@ -35,7 +35,9 @@ app.get('*', (req, res) => {
 app.use((err, req, res, next) => {
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: err.message || 'Something went wrong.' });
+  const body = { error: err.message || 'Something went wrong.' };
+  if (err.code) body.code = err.code; // e.g. PIN_REQUIRED for the wallet client
+  res.status(status).json(body);
 });
 
 app.listen(PORT, () => {
